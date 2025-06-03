@@ -95,12 +95,15 @@ def create_sidebar() -> Optional[WorkflowConfig]:
     st.sidebar.title("🔧 Configuration")
 
     # LLM Configuration
-    llm_type = st.sidebar.selectbox(
-        "LLM Type",
-        options=[LLMType.OPENAI, LLMType.OLLAMA],
+    llm_options = [llm_type.name for llm_type in LLMType]
+    llm_name = st.sidebar.selectbox(
+        "LLM Name",
+        options=llm_options,
         index=0,
         help="Select the language model to use"
     )
+    # Convert back to enum for config
+    llm_enum = LLMType[llm_name]
 
     # Report Configuration
     st.sidebar.subheader("Report Settings")
@@ -198,7 +201,7 @@ def create_sidebar() -> Optional[WorkflowConfig]:
     try:
         config = WorkflowConfig(
             tavily_api_key=os.getenv("TAVILY_API_KEY", ""),
-            llm_type=llm_type,
+            llm_type=llm_enum,  # Pass enum value as before
             docs_dir=docs_dir,
             default_report_filename=report_filename,
             target_word_count=target_word_count,
