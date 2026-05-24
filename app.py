@@ -17,9 +17,11 @@ from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
+import requests
 import streamlit as st
 
 # Import your existing classes
+from llm_factory import DEFAULTS
 from multi_agent_workflow import (
     DEFAULT_PRIMARY_SOURCES,
     DEFAULT_SECONDARY_SOURCES,
@@ -29,6 +31,25 @@ from multi_agent_workflow import (
 )
 
 load_dotenv()
+
+
+@st.cache_data(show_spinner=False, ttl=30)
+def get_local_ollama_models(base_url: str) -> list[str]:
+    """Return local Ollama model names exposed by the Ollama API."""
+    try:
+        response = requests.get(f"{base_url.rstrip('/')}/api/tags", timeout=2)
+        response.raise_for_status()
+        payload = response.json()
+
+        models = [
+            model.get("name", "").strip()
+            for model in payload.get("models", [])
+            if isinstance(model, dict) and model.get("name")
+        ]
+        return sorted(models)
+    except (requests.RequestException, ValueError, TypeError, AttributeError):
+        return []
+
 
 # Configure Streamlit page
 st.set_page_config(
@@ -114,6 +135,36 @@ def create_sidebar() -> Optional[WorkflowConfig]:
     )
     # Convert back to enum for config
     llm_enum = LLMType[llm_name]
+    llm_model = None
+
+    if llm_enum == LLMType.OLLAMA:
+        ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+        ollama_models = get_local_ollama_models(ollama_host)
+
+        if ollama_models:
+            current_model = st.session_state.get("ollama_model_select")
+            default_index = (
+                ollama_models.index(current_model)
+                if current_model in ollama_models
+                else 0
+            )
+            llm_model = st.sidebar.selectbox(
+                "Ollama Model",
+                options=ollama_models,
+                index=default_index,
+                help="Pick one of the models available in your local Ollama instance.",
+                key="ollama_model_select",
+            )
+        else:
+            st.sidebar.warning(
+                "No local Ollama models were found. Make sure Ollama is running and at least one model is pulled."
+            )
+            llm_model = st.sidebar.text_input(
+                "Ollama Model",
+                value=DEFAULTS["ollama_model"],
+                help="Fallback when Ollama cannot be queried yet.",
+                key="ollama_model_input",
+            )
 
     # Report Configuration
     st.sidebar.subheader("Report Settings")
@@ -213,6 +264,7 @@ def create_sidebar() -> Optional[WorkflowConfig]:
         config = WorkflowConfig(
             tavily_api_key=os.getenv("TAVILY_API_KEY", ""),
             llm_type=llm_enum,  # Pass enum value as before
+            llm_model=llm_model if llm_enum == LLMType.OLLAMA else None,
             docs_dir=docs_dir,
             default_report_filename=report_filename,
             target_word_count=target_word_count,

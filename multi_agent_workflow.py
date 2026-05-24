@@ -67,6 +67,7 @@ class WorkflowConfig:
 
     # LLM Configuration
     llm_type: LLMType = LLMType.OPENAI
+    llm_model: Optional[str] = None
 
     # File and Directory Configuration
     docs_dir: str = "./docs"
@@ -243,8 +244,15 @@ class MultiAgentWorkflow:
         """Initialize LlamaIndex settings"""
         try:
             Settings.embed_model = get_embedding_model(llm_type=self.config.llm_type)
-            Settings.llm = get_llm(llm_type=self.config.llm_type)
-            self.logger.info("LlamaIndex initialized with %s", self.config.llm_type)
+            Settings.llm = get_llm(
+                llm_type=self.config.llm_type,
+                model=self.config.llm_model,
+            )
+            self.logger.info(
+                "LlamaIndex initialized with %s%s",
+                self.config.llm_type,
+                f" ({self.config.llm_model})" if self.config.llm_model else "",
+            )
         except Exception as e:
             self.logger.error("Failed to initialize LlamaIndex: %s", e)
             raise

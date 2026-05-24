@@ -4,6 +4,7 @@ Factory module for creating LLM and embedding model instances.
 This module provides factory functions to create LLM and embedding model instances
 based on the specified type (Ollama or OpenAI).
 """
+
 import os
 from enum import Enum
 from llama_index.llms.ollama import Ollama
@@ -14,6 +15,7 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 
 class LLMType(Enum):
     """Enumeration of supported LLM types."""
+
     OLLAMA = "ollama"
     OPENAI = "openai"
 
@@ -24,7 +26,7 @@ DEFAULTS = {
     "temperature": 0.1,
     "timeout": 360.0,
     "ollama_embed_model": "nomic-embed-text:latest",
-    "openai_embed_model": "text-embedding-3-large"
+    "openai_embed_model": "text-embedding-3-large",
 }
 
 
@@ -40,23 +42,32 @@ def get_llm(llm_type: LLMType | str | None = None, **kwargs):
         llm_type_str = (llm_type or os.getenv("LLM_TYPE", "ollama")).lower()
 
     if llm_type_str == "ollama":
-        model_name = kwargs.get("model", DEFAULTS["ollama_model"])
+        model_name = kwargs.get("model") or DEFAULTS["ollama_model"]
+        temperature = kwargs.get("temperature")
+        request_timeout = kwargs.get("request_timeout")
         return Ollama(
             model=model_name,
-            temperature=kwargs.get("temperature", DEFAULTS["temperature"]),
-            request_timeout=kwargs.get("request_timeout", DEFAULTS["timeout"])
+            temperature=DEFAULTS["temperature"] if temperature is None else temperature,
+            request_timeout=(
+                DEFAULTS["timeout"] if request_timeout is None else request_timeout
+            ),
         )
     elif llm_type_str == "openai":
-        model_name = kwargs.get("model", DEFAULTS["openai_model"])
+        model_name = kwargs.get("model") or DEFAULTS["openai_model"]
+        temperature = kwargs.get("temperature")
+        request_timeout = kwargs.get("request_timeout")
         return OpenAI(
-            api_key=kwargs.get("api_key", os.getenv("OPENAI_API_KEY")),
+            api_key=kwargs.get("api_key") or os.getenv("OPENAI_API_KEY"),
             model=model_name,
-            temperature=kwargs.get("temperature", DEFAULTS["temperature"]),
-            request_timeout=kwargs.get("request_timeout", DEFAULTS["timeout"])
+            temperature=DEFAULTS["temperature"] if temperature is None else temperature,
+            request_timeout=(
+                DEFAULTS["timeout"] if request_timeout is None else request_timeout
+            ),
         )
     else:
         raise ValueError(
-            f"Unsupported LLM type: {llm_type}. Supported types are: {[t.value for t in LLMType]}")
+            f"Unsupported LLM type: {llm_type}. Supported types are: {[t.value for t in LLMType]}"
+        )
 
 
 def get_embedding_model(llm_type: LLMType | str | None = None, **kwargs):
@@ -71,15 +82,16 @@ def get_embedding_model(llm_type: LLMType | str | None = None, **kwargs):
         llm_type_str = (llm_type or os.getenv("LLM_TYPE", "ollama")).lower()
 
     if llm_type_str == "ollama":
-        model_name = kwargs.get("embed_model", DEFAULTS["ollama_embed_model"])
+        model_name = kwargs.get("embed_model") or DEFAULTS["ollama_embed_model"]
         return OllamaEmbedding(model_name=model_name)
     elif llm_type_str == "openai":
-        model_name = kwargs.get("embed_model", DEFAULTS["openai_embed_model"])
+        model_name = kwargs.get("embed_model") or DEFAULTS["openai_embed_model"]
         return OpenAIEmbedding(
-            api_key=kwargs.get("api_key", os.getenv("OPENAI_API_KEY")),
-            model=model_name
+            api_key=kwargs.get("api_key") or os.getenv("OPENAI_API_KEY"),
+            model=model_name,
         )
     else:
         raise ValueError(
             f"Unsupported LLM type for embedding: {llm_type}. "
-            f"Supported types are: {[t.value for t in LLMType]}")
+            f"Supported types are: {[t.value for t in LLMType]}"
+        )

@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 
-from multi_agent_workflow import WorkflowConfig
+from multi_agent_workflow import LLMType, WorkflowConfig
 
 
 class WorkflowConfigSourceTierTests(unittest.TestCase):
@@ -62,6 +62,17 @@ class WorkflowConfigSourceTierTests(unittest.TestCase):
                 config.get_secondary_trusted_sources(),
                 ["Google Scholar", "Medical News Today (medicalnewstoday.com)"],
             )
+
+    def test_ollama_model_is_preserved_in_config(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = self._build_config(
+                temp_dir,
+                llm_type=LLMType.OLLAMA,
+                llm_model="llama3.1:8b",
+            )
+
+            self.assertEqual(config.llm_type, LLMType.OLLAMA)
+            self.assertEqual(config.llm_model, "llama3.1:8b")
 
     def test_prompt_template_includes_source_policy(self):
         with tempfile.TemporaryDirectory() as temp_dir:
