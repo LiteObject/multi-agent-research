@@ -1,4 +1,9 @@
-# llm_factory.py
+"""
+Factory module for creating LLM and embedding model instances.
+
+This module provides factory functions to create LLM and embedding model instances
+based on the specified type (Ollama or OpenAI).
+"""
 import os
 from enum import Enum
 from llama_index.llms.ollama import Ollama
@@ -8,6 +13,7 @@ from llama_index.embeddings.openai import OpenAIEmbedding
 
 
 class LLMType(Enum):
+    """Enumeration of supported LLM types."""
     OLLAMA = "ollama"
     OPENAI = "openai"
 
@@ -22,7 +28,7 @@ DEFAULTS = {
 }
 
 
-def get_llm(llm_type: LLMType | str = None, **kwargs):
+def get_llm(llm_type: LLMType | str | None = None, **kwargs):
     """
     Factory method to return an LLM instance based on user preference.
     llm_type: LLMType enum or string ("ollama" or "openai") (default: from env LLM_TYPE)
@@ -53,7 +59,7 @@ def get_llm(llm_type: LLMType | str = None, **kwargs):
             f"Unsupported LLM type: {llm_type}. Supported types are: {[t.value for t in LLMType]}")
 
 
-def get_embedding_model(llm_type: LLMType | str = None, **kwargs):
+def get_embedding_model(llm_type: LLMType | str | None = None, **kwargs):
     """
     Factory method to return an embedding model instance based on user preference.
     llm_type: LLMType enum or string ("ollama" or "openai") (default: from env LLM_TYPE)
@@ -75,4 +81,5 @@ def get_embedding_model(llm_type: LLMType | str = None, **kwargs):
         )
     else:
         raise ValueError(
-            f"Unsupported LLM type for embedding: {llm_type}. Supported types are: {[t.value for t in LLMType]}")
+            f"Unsupported LLM type for embedding: {llm_type}. "
+            f"Supported types are: {[t.value for t in LLMType]}")
