@@ -1,0 +1,37 @@
+name: health_science
+title: Health Science Research Agent
+topic: health science
+audience: general readers
+tone: informative yet conversational
+impact_focus: everyday health
+subject_background: medical topics
+target_word_count: 5000
+min_developments: 5
+max_developments: 7
+default_report_filename: health_report.md
+primary_sources:
+  - PubMed (pubmed.ncbi.nlm.nih.gov)
+  - The Lancet (thelancet.com)
+  - Nature Medicine (nature.com/nm)
+  - ScienceDirect (sciencedirect.com)
+  - National Institutes of Health (NIH) (nih.gov)
+  - World Health Organization (WHO) (who.int)
+  - Centers for Disease Control and Prevention (CDC) (cdc.gov)
+  - MedlinePlus (medlineplus.gov)
+secondary_sources:
+  - Google Scholar
+  - ScienceDaily (sciencedaily.com)
+  - Medical News Today (medicalnewstoday.com)
+  - Healthline (healthline.com)
+  - Everyday Health (everydayhealth.com)
+  - Harvard Health Blog (health.harvard.edu)
+  - Kaiser Health News (KHN) (kffhealthnews.org)
+  - WebMD Doctors Blog (webmd.com)
+  - MobiHealthNews (mobihealthnews.com)
+  - HIMSS (Healthcare Information and Management Systems Society) (himss.org)
+  - American Public Health Association (APHA) (apha.org)
+  - TEDMED (tedmed.com)
+report_rules:
+  - Prefer primary sources for the final citation whenever possible.
+  - Do not treat Google Scholar as a final citation; use it to locate the underlying paper.
+  - If a secondary source is the only lead found, verify it against a primary source before using it in the report.

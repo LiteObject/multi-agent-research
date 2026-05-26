@@ -1,46 +1,33 @@
+import asyncio
 import os
 import datetime
 import logging
+from enum import Enum
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, AsyncIterator, Callable, List, Optional
 from dataclasses import dataclass, field
 from llama_index.core.agent.workflow import FunctionAgent
-from llama_index.tools.tavily_research import TavilyToolSpec
 from llama_index.core.agent.workflow import (
     AgentOutput,
     ToolCall,
     ToolCallResult,
 )
-from llama_index.core import Settings
 from llama_index.core.workflow import Context
 from llama_index.core.agent.workflow import AgentWorkflow
 from llm_factory import get_llm, get_embedding_model, LLMType
-
-DEFAULT_PRIMARY_SOURCES = [
-    "PubMed (pubmed.ncbi.nlm.nih.gov)",
-    "The Lancet (thelancet.com)",
-    "Nature Medicine (nature.com/nm)",
-    "ScienceDirect (sciencedirect.com)",
-    "National Institutes of Health (NIH) (nih.gov)",
-    "World Health Organization (WHO) (who.int)",
-    "Centers for Disease Control and Prevention (CDC) (cdc.gov)",
-    "MedlinePlus (medlineplus.gov)",
-]
-
-DEFAULT_SECONDARY_SOURCES = [
-    "Google Scholar",
-    "ScienceDaily (sciencedaily.com)",
-    "Medical News Today (medicalnewstoday.com)",
-    "Healthline (healthline.com)",
-    "Everyday Health (everydayhealth.com)",
-    "Harvard Health Blog (health.harvard.edu)",
-    "Kaiser Health News (KHN) (kffhealthnews.org)",
-    "WebMD Doctors Blog (webmd.com)",
-    "MobiHealthNews (mobihealthnews.com)",
-    "HIMSS (Healthcare Information and Management Systems Society) (himss.org)",
-    "American Public Health Association (APHA) (apha.org)",
-    "TEDMED (tedmed.com)",
-]
+from research_profiles import (
+    DEFAULT_PRIMARY_SOURCES,
+    DEFAULT_SECONDARY_SOURCES,
+    ResearchProfile,
+    build_default_research_profile,
+    get_effective_research_profile,
+)
+from workflow_adapters import (
+    LocalReportPersistenceAdapter,
+    ReportPersistenceAdapter,
+    SearchToolAdapter,
+    TavilySearchAdapter,
+)
 
 PRIMARY_SOURCE_HINTS = (
     "pubmed",
@@ -56,9 +43,36 @@ PRIMARY_SOURCE_HINTS = (
 )
 
 
+DEFAULT_TARGET_WORD_COUNT = 5000
+DEFAULT_MIN_DEVELOPMENTS = 5
+DEFAULT_MAX_DEVELOPMENTS = 7
+DEFAULT_REPORT_FILENAME = "report.md"
+
+
+def get_default_research_profile() -> ResearchProfile:
+    """Return the active research profile with environment overrides applied."""
+    return get_effective_research_profile(os.getenv("RESEARCH_PROFILE_PATH"))
+
+
+def get_default_primary_sources() -> List[str]:
+    """Return the default primary sources for the active profile."""
+    return list(get_default_research_profile().primary_sources)
+
+
+def get_default_secondary_sources() -> List[str]:
+    """Return the default secondary sources for the active profile."""
+    return list(get_default_research_profile().secondary_sources)
+
+
 @dataclass
 class WorkflowConfig:
     """Configuration class for the multi-agent workflow"""
+
+    research_profile_path: Optional[str] = field(
+        default_factory=lambda: os.getenv("RESEARCH_PROFILE_PATH")
+    )
+
+    research_profile: ResearchProfile = field(init=False, repr=False)
 
     # API Configuration
     tavily_api_key: Optional[str] = field(
@@ -71,12 +85,12 @@ class WorkflowConfig:
 
     # File and Directory Configuration
     docs_dir: str = "./docs"
-    default_report_filename: str = "report.md"
+    default_report_filename: str = DEFAULT_REPORT_FILENAME
 
     # Report Configuration
-    target_word_count: int = 5000
-    min_developments: int = 5
-    max_developments: int = 7
+    target_word_count: int = DEFAULT_TARGET_WORD_COUNT
+    min_developments: int = DEFAULT_MIN_DEVELOPMENTS
+    max_developments: int = DEFAULT_MAX_DEVELOPMENTS
 
     # Workflow Configuration
     max_iterations: int = 10
@@ -93,10 +107,29 @@ class WorkflowConfig:
 
     def __post_init__(self):
         """Validate configuration after initialization"""
+        self._initialize_research_profile()
         self._initialize_source_tiers()
         self.validate()
         self._setup_logging()
         self._ensure_directories()
+
+    def _initialize_research_profile(self) -> None:
+        """Load the active research profile and apply profile defaults."""
+        self.research_profile = get_effective_research_profile(
+            self.research_profile_path
+        )
+
+        if self.target_word_count == DEFAULT_TARGET_WORD_COUNT:
+            self.target_word_count = self.research_profile.target_word_count
+
+        if self.min_developments == DEFAULT_MIN_DEVELOPMENTS:
+            self.min_developments = self.research_profile.min_developments
+
+        if self.max_developments == DEFAULT_MAX_DEVELOPMENTS:
+            self.max_developments = self.research_profile.max_developments
+
+        if self.default_report_filename == DEFAULT_REPORT_FILENAME:
+            self.default_report_filename = self.research_profile.default_report_filename
 
     def _initialize_source_tiers(self) -> None:
         """Normalize source tier inputs and keep the combined source list in sync."""
@@ -106,8 +139,8 @@ class WorkflowConfig:
                     self._split_sources_by_priority(self.trusted_sources)
                 )
             else:
-                self.primary_sources = list(DEFAULT_PRIMARY_SOURCES)
-                self.secondary_sources = list(DEFAULT_SECONDARY_SOURCES)
+                self.primary_sources = list(self.research_profile.primary_sources)
+                self.secondary_sources = list(self.research_profile.secondary_sources)
 
         self.trusted_sources = [*self.primary_sources, *self.secondary_sources]
 
@@ -140,30 +173,8 @@ class WorkflowConfig:
 
     def get_source_guidance(self) -> str:
         """Return a tiered source guidance block for prompts and instructions."""
-        primary_sources = self.get_primary_trusted_sources()
-        secondary_sources = self.get_secondary_trusted_sources()
-
-        primary_block = (
-            "\n".join(f"- {source}" for source in primary_sources)
-            if primary_sources
-            else "- None configured"
-        )
-        secondary_block = (
-            "\n".join(f"- {source}" for source in secondary_sources)
-            if secondary_sources
-            else "- None configured"
-        )
-
-        return (
-            "Source policy:\n"
-            "Primary sources should be used first for claims, statistics, outcomes, approvals, and dates.\n"
-            "Secondary sources should be used for discovery or context only, and any factual claim from them should be corroborated by a primary source.\n\n"
-            f"Primary sources:\n{primary_block}\n\n"
-            f"Secondary sources:\n{secondary_block}\n\n"
-            "Rules:\n"
-            "- Prefer primary sources for the final citation whenever possible.\n"
-            "- Do not treat Google Scholar as a final citation; use it to locate the underlying paper.\n"
-            "- If a secondary source is the only lead found, verify it against a primary source before using it in the report."
+        return self.research_profile.build_source_guidance(
+            self.get_primary_trusted_sources(), self.get_secondary_trusted_sources()
         )
 
     def validate(self) -> None:
@@ -183,6 +194,9 @@ class WorkflowConfig:
 
         if self.max_iterations < 1:
             errors.append("max_iterations must be positive")
+
+        if self.timeout_seconds < 1:
+            errors.append("timeout_seconds must be positive")
 
         if not self.trusted_sources:
             errors.append("At least one trusted source must be configured")
@@ -212,65 +226,249 @@ class WorkflowConfig:
         """Get the main prompt template with configuration values"""
         current_month_year = datetime.datetime.now().strftime("%B %Y")
         source_guidance = self.get_source_guidance()
+        return self.research_profile.build_prompt(
+            target_word_count=self.target_word_count,
+            min_developments=self.min_developments,
+            max_developments=self.max_developments,
+            current_month_year=current_month_year,
+            source_guidance=source_guidance,
+        )
 
-        return f"""
-        Write a {self.target_word_count}-word blog post that highlights and explains
-        {self.min_developments} to {self.max_developments} of the most recent and significant
-        developments in health science as of {current_month_year}. Use the most up-to-date
-        information using the source policy below. For each development, cite your sources in-line in markdown format, including the article or study title,
-        author(s) if available, publication date, and a direct URL. Focus on topics that
-        are relevant to general readers and provide clear, accessible explanations of each
-        breakthrough. Include relevant statistics, cite the source and publication date of
-        each study or article, and end with a takeaway section summarizing why these updates
-        matter for everyday health. Maintain a tone that is informative yet conversational,
-        suitable for a health-conscious audience who may not have a medical background.
 
-        {source_guidance}
-        """
+class ReportStatus(str, Enum):
+    """Lifecycle stages for report generation."""
+
+    RESEARCHING = "researching"
+    DRAFT_READY = "draft_ready"
+    CHANGES_REQUESTED = "changes_requested"
+    APPROVED = "approved"
+    PUBLISHED = "published"
+
+
+class WorkflowEventType(str, Enum):
+    """Structured runtime events emitted by the workflow engine."""
+
+    AGENT_CHANGE = "agent_change"
+    AGENT_OUTPUT = "agent_output"
+    TOOL_CALL = "tool_call"
+    TOOL_RESULT = "tool_result"
+    COMPLETION = "completion"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+
+
+@dataclass
+class WorkflowState:
+    """Typed view over the workflow state stored in the agent context."""
+
+    research_notes: dict[str, str] = field(default_factory=dict)
+    draft_report_content: str = ""
+    report_content: str = "Not written yet."
+    draft_report_filename: str = "report.md"
+    final_report_path: str = ""
+    review: str = "Review required."
+    review_feedback: str = ""
+    review_approved: bool = False
+    report_status: ReportStatus = ReportStatus.RESEARCHING
+    iteration_count: int = 0
+
+    @classmethod
+    def from_raw(cls, raw_state: Any, default_report_filename: str) -> "WorkflowState":
+        """Build a typed state object from the workflow context payload."""
+        if isinstance(raw_state, cls):
+            return raw_state
+
+        if raw_state is None:
+            raw_state = {}
+
+        if not isinstance(raw_state, dict):
+            raise TypeError("Workflow state must be a dictionary payload.")
+
+        research_notes = raw_state.get("research_notes") or {}
+        if not isinstance(research_notes, dict):
+            raise TypeError("Workflow state research_notes must be a dictionary.")
+
+        raw_status = raw_state.get("report_status", ReportStatus.RESEARCHING.value)
+        try:
+            report_status = (
+                raw_status
+                if isinstance(raw_status, ReportStatus)
+                else ReportStatus(str(raw_status))
+            )
+        except ValueError:
+            report_status = ReportStatus.RESEARCHING
+
+        return cls(
+            research_notes={
+                str(title): str(notes) for title, notes in research_notes.items()
+            },
+            draft_report_content=str(raw_state.get("draft_report_content", "")),
+            report_content=str(raw_state.get("report_content", "Not written yet.")),
+            draft_report_filename=str(
+                raw_state.get("draft_report_filename", default_report_filename)
+            ),
+            final_report_path=str(raw_state.get("final_report_path", "")),
+            review=str(raw_state.get("review", "Review required.")),
+            review_feedback=str(raw_state.get("review_feedback", "")),
+            review_approved=bool(raw_state.get("review_approved", False)),
+            report_status=report_status,
+            iteration_count=int(raw_state.get("iteration_count", 0)),
+        )
+
+    def to_raw(self) -> dict[str, Any]:
+        """Convert the typed state back into the payload stored by the agent workflow."""
+        return {
+            "research_notes": dict(self.research_notes),
+            "draft_report_content": self.draft_report_content,
+            "report_content": self.report_content,
+            "draft_report_filename": self.draft_report_filename,
+            "final_report_path": self.final_report_path,
+            "review": self.review,
+            "review_feedback": self.review_feedback,
+            "review_approved": self.review_approved,
+            "report_status": self.report_status.value,
+            "iteration_count": self.iteration_count,
+        }
+
+    def record_notes(self, notes_title: str, notes: str) -> None:
+        self.research_notes[notes_title] = notes
+
+    def store_draft(self, report_content: str, filename: str) -> None:
+        self.report_content = report_content
+        self.draft_report_content = report_content
+        self.draft_report_filename = filename
+        self.report_status = ReportStatus.DRAFT_READY
+        self.review_approved = False
+
+    def request_changes(self, review: str) -> None:
+        self.review = review
+        self.review_feedback = review
+        self.review_approved = False
+        self.report_status = ReportStatus.CHANGES_REQUESTED
+
+    def approve(self) -> None:
+        self.review = "Approved"
+        self.review_feedback = "Approved"
+        self.review_approved = True
+        self.report_status = ReportStatus.APPROVED
+
+    def publish(self, filepath: str) -> None:
+        self.final_report_path = filepath
+        self.report_content = self.draft_report_content
+        self.report_status = ReportStatus.PUBLISHED
+
+    def record_iteration(self, iteration_count: int) -> None:
+        self.iteration_count = iteration_count
+
+
+@dataclass
+class WorkflowRuntimeEvent:
+    """Normalized workflow event payload consumed by the CLI runner and UI."""
+
+    type: WorkflowEventType
+    timestamp: datetime.datetime = field(default_factory=datetime.datetime.now)
+    agent: Optional[str] = None
+    iteration: Optional[int] = None
+    content: Optional[str] = None
+    tool_calls: list[str] = field(default_factory=list)
+    tool_name: Optional[str] = None
+    arguments: dict[str, Any] = field(default_factory=dict)
+    output: Optional[str] = None
+    message: Optional[str] = None
+
+    def to_payload(self) -> dict[str, Any]:
+        """Return a UI-friendly dictionary payload."""
+        payload = {
+            "type": self.type.value,
+            "timestamp": self.timestamp,
+        }
+
+        if self.agent is not None:
+            payload["agent"] = self.agent
+        if self.iteration is not None:
+            payload["iteration"] = self.iteration
+        if self.content is not None:
+            payload["content"] = self.content
+        if self.tool_calls:
+            payload["tool_calls"] = list(self.tool_calls)
+        if self.tool_name is not None:
+            payload["tool_name"] = self.tool_name
+        if self.arguments:
+            payload["arguments"] = dict(self.arguments)
+        if self.output is not None:
+            payload["output"] = self.output
+        if self.message is not None:
+            payload["message"] = self.message
+
+        return payload
 
 
 class MultiAgentWorkflow:
     """Main workflow class that uses configuration"""
 
-    def __init__(self, config: Optional[WorkflowConfig] = None):
+    def __init__(
+        self,
+        config: Optional[WorkflowConfig] = None,
+        search_adapter: Optional[SearchToolAdapter] = None,
+        persistence_adapter: Optional[ReportPersistenceAdapter] = None,
+    ):
         self.config = config or WorkflowConfig()
         self.logger = logging.getLogger(self.__class__.__name__)
-        self._setup_llama_index()
+        self._setup_runtime_dependencies()
+        self.search_adapter = search_adapter or TavilySearchAdapter(
+            self.config.tavily_api_key
+        )
+        self.persistence_adapter = persistence_adapter or LocalReportPersistenceAdapter(
+            self.config.docs_dir,
+            self.config.default_report_filename,
+        )
         self._setup_tools()
         self._setup_agents()
         self._setup_workflow()
 
-    def _setup_llama_index(self) -> None:
-        """Initialize LlamaIndex settings"""
+    def _setup_runtime_dependencies(self) -> None:
+        """Initialize runtime dependencies owned by this workflow instance."""
         try:
-            Settings.embed_model = get_embedding_model(llm_type=self.config.llm_type)
-            Settings.llm = get_llm(
+            self.embedding_model = get_embedding_model(llm_type=self.config.llm_type)
+            self.llm = get_llm(
                 llm_type=self.config.llm_type,
                 model=self.config.llm_model,
             )
             self.logger.info(
-                "LlamaIndex initialized with %s%s",
+                "Workflow runtime initialized with %s%s",
                 self.config.llm_type,
                 f" ({self.config.llm_model})" if self.config.llm_model else "",
             )
         except Exception as e:
-            self.logger.error("Failed to initialize LlamaIndex: %s", e)
+            self.logger.error("Failed to initialize workflow runtime: %s", e)
             raise
 
     def _setup_tools(self) -> None:
         """Initialize tools with error handling"""
         try:
-            tavily_tool = TavilyToolSpec(api_key=self.config.tavily_api_key)
-            tavily_tools = tavily_tool.to_tool_list()
-
-            if not tavily_tools:
-                raise ValueError("No Tavily tools available")
-
+            tavily_tools = self.search_adapter.get_search_tools()
             self.search_web = tavily_tools[0]
             self.logger.info("Tools initialized successfully")
         except Exception as e:
             self.logger.error("Failed to initialize tools: %s", e)
             raise
+
+    async def _get_workflow_state(self, ctx: Context) -> WorkflowState:
+        """Load the typed workflow state from the agent context."""
+        raw_state = await ctx.get("state")
+        return WorkflowState.from_raw(
+            raw_state, default_report_filename=self.config.default_report_filename
+        )
+
+    async def _set_workflow_state(self, ctx: Context, state: WorkflowState) -> None:
+        """Persist the typed workflow state back into the agent context."""
+        await ctx.set("state", state.to_raw())
+
+    def _create_initial_state(self) -> dict[str, Any]:
+        """Build the initial workflow state payload."""
+        return WorkflowState(
+            draft_report_filename=self.config.default_report_filename
+        ).to_raw()
 
     def _setup_agents(self) -> None:
         """Setup all agents with configuration"""
@@ -283,6 +481,7 @@ class MultiAgentWorkflow:
                 "and capture clear source titles, publication dates, and URLs in the notes. "
                 "Once notes are recorded and you are satisfied, hand off control to the WriteAgent to draft the report."
             ),
+            llm=self.llm,
             tools=[self.search_web, self._create_record_notes_tool()],
             can_handoff_to=["WriteAgent"],
         )
@@ -297,6 +496,7 @@ class MultiAgentWorkflow:
                 f"Use write_report to store a draft, then wait for the ReviewAgent. "
                 f"If the ReviewAgent approves the draft, use publish_report to save the final markdown file."
             ),
+            llm=self.llm,
             tools=[
                 self._create_write_report_tool(),
                 self._create_publish_report_tool(),
@@ -312,6 +512,7 @@ class MultiAgentWorkflow:
                 "Your feedback should either request specific changes with review_report or approve the current draft with approve_report. "
                 "When the draft is ready, approve it and hand off control back to the WriteAgent so it can publish the final report."
             ),
+            llm=self.llm,
             tools=[
                 self._create_review_report_tool(),
                 self._create_approve_report_tool(),
@@ -326,11 +527,9 @@ class MultiAgentWorkflow:
 
         async def record_notes(ctx: Context, notes: str, notes_title: str) -> str:
             try:
-                current_state = await ctx.get("state")
-                if "research_notes" not in current_state:
-                    current_state["research_notes"] = {}
-                current_state["research_notes"][notes_title] = notes
-                await ctx.set("state", current_state)
+                state = await self._get_workflow_state(ctx)
+                state.record_notes(notes_title=notes_title, notes=notes)
+                await self._set_workflow_state(ctx, state)
                 self.logger.info("Notes recorded: %s", notes_title)
                 return "Notes recorded successfully."
             except (KeyError, TypeError, RuntimeError) as e:
@@ -347,15 +546,12 @@ class MultiAgentWorkflow:
             ctx: Context, report_content: str, filename: Optional[str] = None
         ) -> str:
             try:
-                current_state = await ctx.get("state")
-                current_state["report_content"] = report_content
-                current_state["draft_report_content"] = report_content
-                current_state["draft_report_filename"] = (
-                    filename or self.config.default_report_filename
+                state = await self._get_workflow_state(ctx)
+                state.store_draft(
+                    report_content=report_content,
+                    filename=filename or self.config.default_report_filename,
                 )
-                current_state["report_status"] = "draft_ready"
-                current_state["review_approved"] = False
-                await ctx.set("state", current_state)
+                await self._set_workflow_state(ctx, state)
 
                 self.logger.info("Draft report stored in workflow state")
                 return "Draft report stored. Awaiting review before publishing."
@@ -375,33 +571,29 @@ class MultiAgentWorkflow:
 
         async def publish_report(ctx: Context, filename: Optional[str] = None) -> str:
             try:
-                current_state = await ctx.get("state")
+                state = await self._get_workflow_state(ctx)
 
-                if not current_state.get("review_approved"):
+                if not state.review_approved:
                     return "Cannot publish report until the ReviewAgent approves the draft."
 
-                report_content = current_state.get("draft_report_content")
+                report_content = state.draft_report_content
                 if not report_content:
                     return (
                         "Cannot publish report because no draft content is available."
                     )
 
-                if current_state.get(
-                    "report_status"
-                ) == "published" and current_state.get("final_report_path"):
-                    return f"Report already published to {current_state['final_report_path']}."
+                if (
+                    state.report_status == ReportStatus.PUBLISHED
+                    and state.final_report_path
+                ):
+                    return f"Report already published to {state.final_report_path}."
 
-                filepath = self.config.get_report_filepath(
-                    filename or current_state.get("draft_report_filename")
+                filepath = self.persistence_adapter.publish_report(
+                    report_content, filename or state.draft_report_filename
                 )
 
-                with open(filepath, "w", encoding="utf-8") as f:
-                    f.write(report_content)
-
-                current_state["final_report_path"] = filepath
-                current_state["report_content"] = report_content
-                current_state["report_status"] = "published"
-                await ctx.set("state", current_state)
+                state.publish(filepath)
+                await self._set_workflow_state(ctx, state)
 
                 self.logger.info("Final report published to: %s", filepath)
                 return f"Final report published to {filepath}."
@@ -421,12 +613,9 @@ class MultiAgentWorkflow:
 
         async def review_report(ctx: Context, review: str) -> str:
             try:
-                current_state = await ctx.get("state")
-                current_state["review"] = review
-                current_state["review_feedback"] = review
-                current_state["review_approved"] = False
-                current_state["report_status"] = "changes_requested"
-                await ctx.set("state", current_state)
+                state = await self._get_workflow_state(ctx)
+                state.request_changes(review)
+                await self._set_workflow_state(ctx, state)
                 self.logger.info("Review feedback recorded")
                 return "Review feedback recorded successfully."
             except (KeyError, TypeError, RuntimeError) as e:
@@ -441,12 +630,9 @@ class MultiAgentWorkflow:
 
         async def approve_report(ctx: Context) -> str:
             try:
-                current_state = await ctx.get("state")
-                current_state["review"] = "Approved"
-                current_state["review_feedback"] = "Approved"
-                current_state["review_approved"] = True
-                current_state["report_status"] = "approved"
-                await ctx.set("state", current_state)
+                state = await self._get_workflow_state(ctx)
+                state.approve()
+                await self._set_workflow_state(ctx, state)
                 self.logger.info("Report approved")
                 return "Report approved successfully."
             except (KeyError, TypeError, RuntimeError) as e:
@@ -461,74 +647,166 @@ class MultiAgentWorkflow:
         self.agent_workflow = AgentWorkflow(
             agents=[self.research_agent, self.write_agent, self.review_agent],
             root_agent=self.research_agent.name,
-            initial_state={
-                "research_notes": {},
-                "draft_report_content": "",
-                "report_content": "Not written yet.",
-                "draft_report_filename": self.config.default_report_filename,
-                "final_report_path": "",
-                "review": "Review required.",
-                "review_feedback": "",
-                "review_approved": False,
-                "report_status": "researching",
-                "iteration_count": 0,
-            },
+            initial_state=self._create_initial_state(),
         )
         self.logger.info("Workflow initialized successfully")
 
-    async def run(self) -> None:
-        """Run the main workflow with error handling and monitoring"""
-        try:
-            self.logger.info("Starting multi-agent workflow")
-            prompt = self.config.get_prompt_template()
+    async def stream_runtime_events(
+        self, cancel_requested: Optional[Callable[[], bool]] = None
+    ) -> AsyncIterator[WorkflowRuntimeEvent]:
+        """Yield normalized runtime events for the workflow execution."""
+        self.logger.info("Starting multi-agent workflow")
+        prompt = self.config.get_prompt_template()
+        handler = self.agent_workflow.run(user_msg=prompt)
 
-            handler = self.agent_workflow.run(user_msg=prompt)
+        current_agent = None
+        iteration_count = 0
+        event_iterator = handler.stream_events().__aiter__()
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
 
-            current_agent = None
-            iteration_count = 0
+        while True:
+            if cancel_requested and cancel_requested():
+                self.logger.info("Workflow cancellation requested")
+                yield WorkflowRuntimeEvent(
+                    type=WorkflowEventType.CANCELLED,
+                    message="Workflow cancelled by user.",
+                )
+                return
 
-            async for event in handler.stream_events():
-                # Check for timeout or max iterations
+            elapsed = loop.time() - started_at
+            remaining_timeout = self.config.timeout_seconds - elapsed
+            if remaining_timeout <= 0:
+                self.logger.warning(
+                    "Workflow timed out after %s seconds",
+                    self.config.timeout_seconds,
+                )
+                yield WorkflowRuntimeEvent(
+                    type=WorkflowEventType.TIMED_OUT,
+                    message=(
+                        "Workflow timed out after "
+                        f"{self.config.timeout_seconds} seconds."
+                    ),
+                )
+                return
+
+            try:
+                event = await asyncio.wait_for(
+                    event_iterator.__anext__(), timeout=remaining_timeout
+                )
+            except StopAsyncIteration:
+                break
+            except asyncio.TimeoutError:
+                self.logger.warning(
+                    "Workflow timed out after %s seconds",
+                    self.config.timeout_seconds,
+                )
+                yield WorkflowRuntimeEvent(
+                    type=WorkflowEventType.TIMED_OUT,
+                    message=(
+                        "Workflow timed out after "
+                        f"{self.config.timeout_seconds} seconds."
+                    ),
+                )
+                return
+
+            if (
+                hasattr(event, "current_agent_name")
+                and event.current_agent_name != current_agent
+            ):
                 if iteration_count >= self.config.max_iterations:
                     self.logger.warning(
                         "Reached max iterations (%s)", self.config.max_iterations
                     )
-                    break
+                    yield WorkflowRuntimeEvent(
+                        type=WorkflowEventType.COMPLETION,
+                        message=(
+                            "Workflow stopped after reaching max iterations "
+                            f"({self.config.max_iterations})."
+                        ),
+                    )
+                    return
 
-                # Print when the current agent changes
-                if (
-                    hasattr(event, "current_agent_name")
-                    and event.current_agent_name != current_agent
-                ):
-                    current_agent = event.current_agent_name
-                    iteration_count += 1
+                current_agent = event.current_agent_name
+                iteration_count += 1
+
+                yield WorkflowRuntimeEvent(
+                    type=WorkflowEventType.AGENT_CHANGE,
+                    agent=current_agent,
+                    iteration=iteration_count,
+                )
+
+            elif isinstance(event, AgentOutput):
+                if event.response.content or event.tool_calls:
+                    yield WorkflowRuntimeEvent(
+                        type=WorkflowEventType.AGENT_OUTPUT,
+                        content=event.response.content,
+                        tool_calls=(
+                            [call.tool_name for call in event.tool_calls]
+                            if event.tool_calls
+                            else []
+                        ),
+                    )
+
+            elif isinstance(event, ToolCallResult):
+                yield WorkflowRuntimeEvent(
+                    type=WorkflowEventType.TOOL_RESULT,
+                    tool_name=event.tool_name,
+                    arguments=getattr(event, "tool_kwargs", {}) or {},
+                    output=str(event.tool_output),
+                )
+
+            elif isinstance(event, ToolCall):
+                yield WorkflowRuntimeEvent(
+                    type=WorkflowEventType.TOOL_CALL,
+                    tool_name=event.tool_name,
+                    arguments=event.tool_kwargs or {},
+                )
+
+        self.logger.info("Workflow completed successfully")
+        yield WorkflowRuntimeEvent(
+            type=WorkflowEventType.COMPLETION,
+            message="Workflow completed successfully",
+        )
+
+    async def run(self) -> None:
+        """Run the main workflow with error handling and monitoring"""
+        try:
+            async for event in self.stream_runtime_events():
+                if event.type == WorkflowEventType.AGENT_CHANGE:
                     print(f"\n{'='*50}")
-                    print(f"🤖 Agent: {current_agent} (Iteration {iteration_count})")
+                    print(f"🤖 Agent: {event.agent} (Iteration {event.iteration})")
                     print(f"{'='*50}\n")
-                    self.logger.info("Agent changed to: %s", current_agent)
+                    self.logger.info("Agent changed to: %s", event.agent)
 
-                # Print agent output
-                elif isinstance(event, AgentOutput):
-                    if event.response.content:
-                        print("📤 Output:", event.response.content)
+                elif event.type == WorkflowEventType.AGENT_OUTPUT:
+                    if event.content:
+                        print("📤 Output:", event.content)
                     if event.tool_calls:
                         print(
                             "🛠️  Planning to use tools:",
-                            [call.tool_name for call in event.tool_calls],
+                            event.tool_calls,
                         )
 
-                # Print tool call results
-                elif isinstance(event, ToolCallResult):
+                elif event.type == WorkflowEventType.TOOL_RESULT:
                     print(f"🔧 Tool Result ({event.tool_name}):")
-                    print(f"  Arguments: {event.tool_kwargs}")
-                    print(f"  Output: {event.tool_output}")
+                    print(f"  Arguments: {event.arguments}")
+                    print(f"  Output: {event.output}")
 
-                # Print when a tool is being called
-                elif isinstance(event, ToolCall):
+                elif event.type == WorkflowEventType.TOOL_CALL:
                     print(f"🔨 Calling Tool: {event.tool_name}")
-                    print(f"  With arguments: {event.tool_kwargs}")
+                    print(f"  With arguments: {event.arguments}")
 
-            self.logger.info("Workflow completed successfully")
+                elif (
+                    event.type
+                    in (
+                        WorkflowEventType.COMPLETION,
+                        WorkflowEventType.CANCELLED,
+                        WorkflowEventType.TIMED_OUT,
+                    )
+                    and event.message
+                ):
+                    print(event.message)
 
         except Exception as e:
             self.logger.error("Workflow failed: %s", e)
