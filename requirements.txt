@@ -53,7 +53,7 @@ llama-index-readers-llama-parse==0.4.0
 llama-index-tools-tavily-research==0.3.0
 llama-parse==0.6.25
 MarkupSafe==3.0.2
-marshmallow==3.26.1
+marshmallow==3.26.2
 multidict==6.4.4
 mypy_extensions==1.1.0
 narwhals==1.41.0
